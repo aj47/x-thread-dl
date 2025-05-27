@@ -11,6 +11,7 @@ from apify_client import ApifyClient
 
 # Import configuration
 import config
+from exceptions import ScrapingError, ValidationError
 
 # Set up logging
 logging.basicConfig(
@@ -28,15 +29,21 @@ class Scraper:
 
         Args:
             api_token (Optional[str]): The Apify API token. If None, uses the token from config.
+            
+        Raises:
+            ValidationError: If no valid API token is provided.
         """
         self.api_token = api_token or config.APIFY_API_TOKEN
         if not self.api_token:
-            logger.warning("No Apify API token provided. Scraping will likely fail.")
+            raise ValidationError("No Apify API token provided. Scraping cannot proceed without a valid token.")
 
         # Initialize the Apify client
-        self.client = ApifyClient(token=self.api_token)
+        try:
+            self.client = ApifyClient(token=self.api_token)
+        except Exception as e:
+            raise ScrapingError(f"Failed to initialize Apify client: {str(e)}") from e
 
-    async def fetch_tweet(self, url: str) -> Optional[Dict[str, Any]]:
+    async def fetch_tweet(self, url: str) -> Dict[str, Any]:
         """
         Fetch a tweet using Apify's Twitter Scraper.
 
@@ -44,7 +51,11 @@ class Scraper:
             url (str): The X.com (Twitter) URL to scrape
 
         Returns:
-            Optional[Dict[str, Any]]: The tweet data or None if scraping failed
+            Dict[str, Any]: The tweet data
+            
+        Raises:
+            ValidationError: If URL is invalid or tweet ID cannot be extracted.
+            ScrapingError: If scraping fails or no data is returned.
         """
         try:
             logger.info(f"Fetching tweet from URL: {url}")
@@ -52,8 +63,7 @@ class Scraper:
             # Extract tweet ID from URL
             tweet_id = self._extract_tweet_id(url)
             if not tweet_id:
-                logger.error(f"Could not extract tweet ID from URL: {url}")
-                return None
+                raise ValidationError(f"Could not extract tweet ID from URL: {url}")
 
             # Ensure URL is properly formatted
             formatted_url = self._format_url(url)
@@ -71,20 +81,25 @@ class Scraper:
 
             # Use a separate thread for the blocking API call
             loop = asyncio.get_event_loop()
-            run = await loop.run_in_executor(
-                None,
-                lambda: self.client.actor(config.TWITTER_SCRAPER_ACTOR_ID).call(run_input=input_data)
-            )
+            try:
+                run = await loop.run_in_executor(
+                    None,
+                    lambda: self.client.actor(config.TWITTER_SCRAPER_ACTOR_ID).call(run_input=input_data)
+                )
+            except Exception as e:
+                raise ScrapingError(f"Failed to execute Apify actor for URL {url}: {str(e)}") from e
 
             # Get the dataset items
-            dataset_items = await loop.run_in_executor(
-                None,
-                lambda: self.client.dataset(run["defaultDatasetId"]).list_items().items
-            )
+            try:
+                dataset_items = await loop.run_in_executor(
+                    None,
+                    lambda: self.client.dataset(run["defaultDatasetId"]).list_items().items
+                )
+            except Exception as e:
+                raise ScrapingError(f"Failed to retrieve dataset items for URL {url}: {str(e)}") from e
 
             if not dataset_items:
-                logger.warning(f"No tweet data found for URL: {url}")
-                return None
+                raise ScrapingError(f"No tweet data found for URL: {url}")
 
             # Get the first (and should be only) item
             tweet_data = dataset_items[0]
@@ -94,11 +109,14 @@ class Scraper:
 
             return tweet_data
 
+        except (ValidationError, ScrapingError):
+            # Re-raise our custom exceptions
+            raise
         except Exception as e:
-            logger.error(f"Error fetching tweet from URL {url}: {str(e)}", exc_info=True)
-            return None
+            # Wrap unexpected exceptions
+            raise ScrapingError(f"Unexpected error fetching tweet from URL {url}: {str(e)}") from e
 
-    async def fetch_tweet_replies(self, url: str, limit: int = config.DEFAULT_REPLY_LIMIT) -> Optional[List[Dict[str, Any]]]:
+    async def fetch_tweet_replies(self, url: str, limit: int = config.DEFAULT_REPLY_LIMIT) -> List[Dict[str, Any]]:
         """
         Fetch replies to a tweet using Apify's Twitter Replies Scraper.
 
@@ -107,9 +125,16 @@ class Scraper:
             limit (int): Maximum number of replies to fetch
 
         Returns:
-            Optional[List[Dict[str, Any]]]: List of reply data or None if scraping failed
+            List[Dict[str, Any]]: List of reply data
+            
+        Raises:
+            ValidationError: If URL is invalid or limit is invalid.
+            ScrapingError: If scraping fails.
         """
         try:
+            if limit <= 0:
+                raise ValidationError(f"Reply limit must be positive, got: {limit}")
+                
             logger.info(f"Fetching up to {limit} tweet replies from URL: {url}")
 
             # Ensure URL is properly formatted
@@ -124,16 +149,22 @@ class Scraper:
 
             # Use a separate thread for the blocking API call
             loop = asyncio.get_event_loop()
-            run = await loop.run_in_executor(
-                None,
-                lambda: self.client.actor(config.TWITTER_REPLIES_SCRAPER_ACTOR_ID).call(run_input=input_data)
-            )
+            try:
+                run = await loop.run_in_executor(
+                    None,
+                    lambda: self.client.actor(config.TWITTER_REPLIES_SCRAPER_ACTOR_ID).call(run_input=input_data)
+                )
+            except Exception as e:
+                raise ScrapingError(f"Failed to execute replies scraper for URL {url}: {str(e)}") from e
 
             # Get the dataset items
-            dataset_items = await loop.run_in_executor(
-                None,
-                lambda: self.client.dataset(run["defaultDatasetId"]).list_items().items
-            )
+            try:
+                dataset_items = await loop.run_in_executor(
+                    None,
+                    lambda: self.client.dataset(run["defaultDatasetId"]).list_items().items
+                )
+            except Exception as e:
+                raise ScrapingError(f"Failed to retrieve reply dataset items for URL {url}: {str(e)}") from e
 
             if not dataset_items:
                 logger.warning(f"No reply data found for URL: {url}")
@@ -151,9 +182,12 @@ class Scraper:
 
             return dataset_items
 
+        except (ValidationError, ScrapingError):
+            # Re-raise our custom exceptions
+            raise
         except Exception as e:
-            logger.error(f"Error fetching tweet replies from URL {url}: {str(e)}", exc_info=True)
-            return None
+            # Wrap unexpected exceptions
+            raise ScrapingError(f"Unexpected error fetching tweet replies from URL {url}: {str(e)}") from e
 
     async def fetch_tweet_and_replies(self, url: str, reply_limit: int = config.DEFAULT_REPLY_LIMIT) -> Dict[str, Any]:
         """
@@ -165,17 +199,28 @@ class Scraper:
 
         Returns:
             Dict[str, Any]: Dictionary containing the tweet and its replies
+            
+        Raises:
+            ValidationError: If URL or reply_limit is invalid.
+            ScrapingError: If scraping fails.
         """
-        # Fetch the tweet
-        tweet = await self.fetch_tweet(url)
+        try:
+            # Fetch the tweet
+            tweet = await self.fetch_tweet(url)
 
-        # Fetch the replies
-        replies = await self.fetch_tweet_replies(url, reply_limit)
+            # Fetch the replies
+            replies = await self.fetch_tweet_replies(url, reply_limit)
 
-        return {
-            "tweet": tweet,
-            "replies": replies or []
-        }
+            return {
+                "tweet": tweet,
+                "replies": replies
+            }
+        except (ValidationError, ScrapingError):
+            # Re-raise our custom exceptions
+            raise
+        except Exception as e:
+            # Wrap unexpected exceptions
+            raise ScrapingError(f"Unexpected error fetching tweet and replies from URL {url}: {str(e)}") from e
 
     def extract_video_url(self, tweet_data: Dict[str, Any]) -> Optional[str]:
         """
@@ -186,8 +231,14 @@ class Scraper:
 
         Returns:
             Optional[str]: The highest quality video URL or None if no video exists
+            
+        Raises:
+            ScrapingError: If tweet_data is invalid or extraction fails unexpectedly.
         """
         try:
+            if not tweet_data or not isinstance(tweet_data, dict):
+                raise ScrapingError("Invalid tweet data provided for video extraction")
+                
             # Check if video exists in the tweet data
             if 'video' in tweet_data and tweet_data['video'] and 'variants' in tweet_data['video']:
                 variants = tweet_data['video']['variants']
@@ -244,9 +295,11 @@ class Scraper:
 
             logger.debug("No video found in tweet data")
             return None
+        except ScrapingError:
+            # Re-raise our custom exceptions
+            raise
         except Exception as e:
-            logger.error(f"Error extracting video URL from tweet data: {str(e)}", exc_info=True)
-            return None
+            raise ScrapingError(f"Unexpected error extracting video URL from tweet data: {str(e)}") from e
 
     def _extract_tweet_id(self, url: str) -> Optional[str]:
         """
@@ -257,8 +310,14 @@ class Scraper:
 
         Returns:
             Optional[str]: The tweet ID or None if extraction failed
+            
+        Raises:
+            ValidationError: If URL format is invalid.
         """
         try:
+            if not url or not isinstance(url, str):
+                raise ValidationError("URL must be a non-empty string")
+                
             # Pattern to match tweet IDs in X.com (Twitter) URLs
             pattern = r'(?:twitter\.com|x\.com)/\w+/status/(\d+)'
             match = re.search(pattern, url)
@@ -270,9 +329,11 @@ class Scraper:
             logger.debug(f"No tweet ID found in URL: {url} using pattern: {pattern}")
 
             return None
+        except ValidationError:
+            # Re-raise validation errors
+            raise
         except Exception as e:
-            logger.error(f"Error extracting tweet ID from URL {url}: {str(e)}", exc_info=True)
-            return None
+            raise ValidationError(f"Error extracting tweet ID from URL {url}: {str(e)}") from e
 
     def _format_url(self, url: str) -> str:
         """
@@ -283,7 +344,16 @@ class Scraper:
 
         Returns:
             str: The formatted URL
+            
+        Raises:
+            ValidationError: If URL is invalid.
         """
-        if not url.startswith('http'):
-            return f"https://{url}"
-        return url
+        try:
+            if not url or not isinstance(url, str):
+                raise ValidationError("URL must be a non-empty string")
+                
+            if not url.startswith('http'):
+                return f"https://{url}"
+            return url
+        except Exception as e:
+            raise ValidationError(f"Error formatting URL {url}: {str(e)}") from e

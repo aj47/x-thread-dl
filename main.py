@@ -24,6 +24,7 @@ import config
 from scraper import Scraper
 from thread_parser import parse_tweet_and_replies_data # Updated import
 from video_downloader import save_parsed_thread_data  # Updated import, was video_downloader
+from exceptions import XThreadDLError, ScrapingError, ValidationError, VideoDownloadError
 
 # Set up logging
 logging.basicConfig(
@@ -82,10 +83,25 @@ async def process_thread_and_replies(tweet_url: str, reply_limit: int, base_outp
     try:
         logger.info(f"Processing URL: {tweet_url}")
 
-        scraper_instance = Scraper(api_token=api_token)
+        # Initialize scraper with proper error handling
+        try:
+            scraper_instance = Scraper(api_token=api_token)
+        except ValidationError as e:
+            logger.error(f"Configuration error: {e}")
+            sys.exit(1)
+        except ScrapingError as e:
+            logger.error(f"Failed to initialize scraper: {e}")
+            sys.exit(1)
 
         logger.info(f"Fetching main tweet and up to {reply_limit} replies...")
-        scraped_content = await scraper_instance.fetch_tweet_and_replies(tweet_url, reply_limit)
+        try:
+            scraped_content = await scraper_instance.fetch_tweet_and_replies(tweet_url, reply_limit)
+        except ValidationError as e:
+            logger.error(f"Invalid input: {e}")
+            sys.exit(1)
+        except ScrapingError as e:
+            logger.error(f"Scraping failed: {e}")
+            sys.exit(1)
 
         main_tweet_data = scraped_content.get('tweet')
         replies_list_data = scraped_content.get('replies', []) # Default to empty list if None
@@ -98,7 +114,11 @@ async def process_thread_and_replies(tweet_url: str, reply_limit: int, base_outp
 
         logger.info("Parsing fetched data...")
         # Pass the scraper instance for its utility functions like extract_video_url
-        parsed_data = parse_tweet_and_replies_data(main_tweet_data, replies_list_data, scraper_instance)
+        try:
+            parsed_data = parse_tweet_and_replies_data(main_tweet_data, replies_list_data, scraper_instance)
+        except Exception as e:
+            logger.error(f"Failed to parse tweet and reply data: {e}")
+            sys.exit(1)
 
         if not parsed_data:
             logger.error("Failed to parse tweet and reply data. Aborting.")
@@ -109,7 +129,14 @@ async def process_thread_and_replies(tweet_url: str, reply_limit: int, base_outp
         logger.info(f"Data parsed for user '{user_name}', thread '{tid}'.")
 
         logger.info(f"Saving content to base directory: {base_output_dir}")
-        saved_media_files = save_parsed_thread_data(parsed_data, base_output_dir, list_formats)
+        try:
+            saved_media_files = save_parsed_thread_data(parsed_data, base_output_dir, list_formats)
+        except ValidationError as e:
+            logger.error(f"Invalid data for saving: {e}")
+            sys.exit(1)
+        except VideoDownloadError as e:
+            logger.error(f"Failed to save/download content: {e}")
+            sys.exit(1)
 
         if not saved_media_files:
             logger.warning("No files were saved. This might be due to no content found or errors during saving/downloading.")
@@ -123,8 +150,12 @@ async def process_thread_and_replies(tweet_url: str, reply_limit: int, base_outp
             final_output_location = os.path.join(base_output_dir, user_name, tid)
             logger.info(f"All content for this thread saved under: {os.path.abspath(final_output_location)}")
 
+    except XThreadDLError as e:
+        # Handle any remaining custom exceptions
+        logger.error(f"Application error: {e}")
+        sys.exit(1)
     except Exception as e:
-        logger.error(f"An critical error occurred during processing: {str(e)}", exc_info=True)
+        logger.error(f"An unexpected error occurred during processing: {str(e)}", exc_info=True)
         sys.exit(1)
 
 if __name__ == '__main__':
